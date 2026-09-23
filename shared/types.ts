@@ -19,6 +19,7 @@ export type HandEntry = {
   finished: boolean;
   elden: boolean;
   okeyFinish: boolean;
+  saved: boolean;
 };
 
 export type Player = {
@@ -31,6 +32,7 @@ export type Player = {
 
 export type HandHistory = {
   scores: [number, number, number, number];
+  entries?: [HandEntry, HandEntry, HandEntry, HandEntry];
 };
 
 export type Phase = "lobby" | "playing" | "scoring";
@@ -54,6 +56,8 @@ export type ClientEvent =
   | { type: "endHand" }
   | { type: "submit"; entry: HandEntry }
   | { type: "lock" }
+  | { type: "undo" }
+  | { type: "cancelHand" }
   | { type: "next" }
   | { type: "resetScores" };
 
@@ -82,6 +86,7 @@ export function blankEntry(seat: Seat): HandEntry {
     finished: false,
     elden: false,
     okeyFinish: false,
+    saved: false,
   };
 }
 

@@ -25,6 +25,14 @@ function actorPlayer(game: GameState, actorId: string) {
   return game.players.find((p) => p.id === actorId);
 }
 
+export function handoffHost(game: GameState): GameState {
+  const host = game.players.find((p) => p.id === game.hostId);
+  if (host?.connected) return game;
+  const next = game.players.find((p) => !p.guest && p.connected);
+  if (!next || next.id === game.hostId) return game;
+  return { ...game, hostId: next.id };
+}
+
 function sanitizeEntry(entry: HandEntry, seat: Seat): HandEntry {
   const remaining = Math.max(0, Math.round(Number(entry.remaining) || 0));
   const okeyCount = Math.min(2, Math.max(0, Math.round(Number(entry.okeyCount) || 0)));
@@ -50,6 +58,7 @@ function sanitizeEntry(entry: HandEntry, seat: Seat): HandEntry {
     finished,
     elden: finished && Boolean(entry.elden),
     okeyFinish: finished && Boolean(entry.okeyFinish),
+    saved: true,
   };
 }
 
@@ -181,9 +190,31 @@ export function applyEvent(game: GameState, actorId: string, event: ClientEvent)
         ...game,
         phase: "playing",
         current: null,
-        history: [...game.history, { scores }],
+        history: [...game.history, { scores, entries: game.current }],
         totals,
       });
+    }
+    case "undo": {
+      if (!isHost(game, actorId)) return err(game, "Son eli masa sahibi geri alır.");
+      if (game.phase !== "playing") return err(game, "Açık eli önce iptal et.");
+      const last = game.history[game.history.length - 1];
+      if (!last) return err(game, "Geri alınacak el yok.");
+      const totals: [number, number, number, number] = [
+        game.totals[0] - last.scores[0],
+        game.totals[1] - last.scores[1],
+        game.totals[2] - last.scores[2],
+        game.totals[3] - last.scores[3],
+      ];
+      return ok({
+        ...game,
+        history: game.history.slice(0, -1),
+        totals,
+      });
+    }
+    case "cancelHand": {
+      if (!isHost(game, actorId)) return err(game, "Eli masa sahibi iptal eder.");
+      if (game.phase !== "scoring") return err(game, "Açık el yok.");
+      return ok({ ...game, phase: "playing", current: null });
     }
     case "next": {
       if (!isHost(game, actorId)) return err(game, "Sadece masa sahibi.");

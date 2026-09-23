@@ -29,8 +29,17 @@ type Model = {
   toastOk: boolean;
   error: string;
   ws: WebSocket | null;
+  roomCode: string;
+  wantSocket: boolean;
+  reconnecting: boolean;
+  reconnectAttempt: number;
+  reconnectTimer: number | null;
+  pingTimer: number | null;
+  pongTimer: number | null;
   alip: { tile: number; open: "per" | "cift" } | null;
+  openHand: number | null;
   lastPhase: GameState["phase"] | null;
+  formDirty: boolean;
 };
 
 const model: Model = {
@@ -47,8 +56,17 @@ const model: Model = {
   toastOk: false,
   error: "",
   ws: null,
+  roomCode: "",
+  wantSocket: false,
+  reconnecting: false,
+  reconnectAttempt: 0,
+  reconnectTimer: null,
+  pingTimer: null,
+  pongTimer: null,
   alip: null,
+  openHand: null,
   lastPhase: null,
+  formDirty: false,
 };
 
 const root = document.getElementById("app")!;
@@ -64,6 +82,33 @@ function toast(message: string, ok = false) {
         render();
       }
     }, 3200);
+  }
+}
+
+function noteTransition(prevPhase: GameState["phase"] | null, prevHistory: number, next: GameState) {
+  if (model.openHand != null && model.openHand >= next.history.length) model.openHand = null;
+  if (prevPhase === "scoring" && next.phase === "playing" && next.history.length > prevHistory) {
+    toast("El yazıldı.", true);
+    return;
+  }
+  if (prevPhase === "scoring" && next.phase === "playing") {
+    toast("El iptal edildi.", true);
+    return;
+  }
+  if (prevHistory > next.history.length) toast("Son el geri alındı.", true);
+}
+
+function renderKeepingFocus() {
+  const active = document.activeElement;
+  const field = active instanceof HTMLInputElement ? active.dataset.field ?? "" : "";
+  const start = active instanceof HTMLInputElement ? active.selectionStart : null;
+  const end = active instanceof HTMLInputElement ? active.selectionEnd : null;
+  render();
+  if (!field) return;
+  const next = root.querySelector(`input[data-field="${field}"]`);
+  if (next instanceof HTMLInputElement) {
+    next.focus();
+    if (start != null && end != null) next.setSelectionRange(start, end);
   }
 }
 
@@ -85,6 +130,8 @@ function render() {
     toast: model.toast,
     toastOk: model.toastOk,
     solo: model.solo,
+    reconnecting: model.reconnecting,
+    openHand: model.openHand,
     alip: model.alip,
   });
 }
@@ -93,40 +140,143 @@ function send(event: ClientEvent) {
   if (model.solo) {
     if (!model.game) return;
     const prev = model.game.phase;
+    const prevHistory = model.game.history.length;
     const result = applyEvent(model.game, model.youId, event);
     if (result.error) toast(result.error);
     model.game = result.game;
     const me = model.game.players.find((p) => p.id === model.youId);
-    if (model.game.phase === "scoring" && prev !== "scoring" && me?.seat != null) {
-      model.formSeat = me.seat;
+    if (model.game.phase === "scoring" && prev !== "scoring") {
+      model.formDirty = false;
+      if (me?.seat != null) model.formSeat = me.seat;
     }
     model.lastPhase = model.game.phase;
     syncFormFromGame();
     localStorage.setItem("okey.solo", JSON.stringify(model.game));
-    if (prev === "scoring" && model.game.phase === "playing") toast("El yazıldı.", true);
+    if (!result.error) noteTransition(prev, prevHistory, model.game);
     render();
     return;
   }
   if (!model.ws || model.ws.readyState !== WebSocket.OPEN) {
-    toast("Bağlantı yok.");
+    toast(model.reconnecting ? "Yeniden bağlanıyor." : "Bağlantı yok.");
+    nudgeReconnect();
     return;
   }
   model.ws.send(JSON.stringify(event));
 }
 
 function syncFormFromGame() {
+  if (model.formDirty) return;
   const g = model.game;
   if (!g?.current) return;
   const entry = g.current[model.formSeat];
   if (entry) model.form = { ...entry, penalties: [...entry.penalties] };
 }
 
-function connect(code: string) {
-  model.ws?.close();
+function touchForm() {
+  model.formDirty = true;
+}
+
+function stopHeartbeat() {
+  if (model.pingTimer != null) {
+    window.clearInterval(model.pingTimer);
+    model.pingTimer = null;
+  }
+  if (model.pongTimer != null) {
+    window.clearTimeout(model.pongTimer);
+    model.pongTimer = null;
+  }
+}
+
+function armPongTimeout(ws: WebSocket) {
+  if (model.pongTimer != null) window.clearTimeout(model.pongTimer);
+  model.pongTimer = window.setTimeout(() => {
+    model.pongTimer = null;
+    if (model.ws === ws && ws.readyState === WebSocket.OPEN) ws.close();
+  }, 8000);
+}
+
+function startHeartbeat(ws: WebSocket) {
+  stopHeartbeat();
+  model.pingTimer = window.setInterval(() => {
+    if (model.ws !== ws) {
+      stopHeartbeat();
+      return;
+    }
+    if (ws.readyState !== WebSocket.OPEN) return;
+    if (model.pongTimer != null) return;
+    try {
+      ws.send("ping");
+      armPongTimeout(ws);
+    } catch {
+      ws.close();
+    }
+  }, 15000);
+}
+
+function stopOnline() {
+  model.wantSocket = false;
+  model.reconnecting = false;
+  model.roomCode = "";
+  model.reconnectAttempt = 0;
+  if (model.reconnectTimer != null) {
+    window.clearTimeout(model.reconnectTimer);
+    model.reconnectTimer = null;
+  }
+  stopHeartbeat();
+  const ws = model.ws;
+  model.ws = null;
+  ws?.close();
+}
+
+function scheduleReconnect() {
+  if (model.reconnectTimer != null || !model.roomCode || !model.wantSocket) return;
+  const delay = Math.min(8000, 1000 * 2 ** model.reconnectAttempt);
+  model.reconnectAttempt += 1;
+  model.reconnectTimer = window.setTimeout(() => {
+    model.reconnectTimer = null;
+    if (!model.wantSocket || !model.roomCode || model.solo) return;
+    openSocket(model.roomCode);
+  }, delay);
+}
+
+function nudgeReconnect() {
+  if (!model.wantSocket || model.solo || !model.roomCode || model.screen !== "table") return;
+  const ws = model.ws;
+  if (ws && ws.readyState === WebSocket.CONNECTING) return;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try {
+      ws.send("ping");
+      armPongTimeout(ws);
+    } catch {
+      ws.close();
+    }
+    return;
+  }
+  if (model.reconnectTimer != null) {
+    window.clearTimeout(model.reconnectTimer);
+    model.reconnectTimer = null;
+  }
+  model.reconnecting = true;
+  openSocket(model.roomCode);
+}
+
+function openSocket(code: string) {
+  const prev = model.ws;
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${proto}//${location.host}/ws/${code}`);
   model.ws = ws;
+  if (prev && prev.readyState !== WebSocket.CLOSED) prev.close();
+
   ws.addEventListener("open", () => {
+    if (model.ws !== ws) return;
+    const returned = model.reconnecting;
+    model.reconnecting = false;
+    model.reconnectAttempt = 0;
+    if (model.reconnectTimer != null) {
+      window.clearTimeout(model.reconnectTimer);
+      model.reconnectTimer = null;
+    }
+    startHeartbeat(ws);
     ws.send(
       JSON.stringify({
         type: "hello",
@@ -134,9 +284,18 @@ function connect(code: string) {
         name: model.name.trim() || "Oyuncu",
       } satisfies ClientEvent),
     );
+    if (returned) toast("Bağlandı.", true);
   });
+
   ws.addEventListener("message", (ev) => {
-    if (ev.data === "pong") return;
+    if (model.ws !== ws) return;
+    if (ev.data === "pong") {
+      if (model.pongTimer != null) {
+        window.clearTimeout(model.pongTimer);
+        model.pongTimer = null;
+      }
+      return;
+    }
     try {
       const msg = JSON.parse(String(ev.data)) as { type: string; game?: GameState; youId?: string; message?: string };
       if (msg.type === "error" && msg.message) {
@@ -144,24 +303,38 @@ function connect(code: string) {
         return;
       }
       if (msg.type === "state" && msg.game) {
+        const prevHost = model.game?.hostId ?? "";
+        const prevHistory = model.game?.history.length ?? 0;
+        const becameHost = prevHost !== "" && msg.game.hostId !== prevHost && msg.game.hostId === model.youId;
+        const prev = model.lastPhase;
         model.game = msg.game;
         model.screen = "table";
         model.error = "";
-        const prev = model.lastPhase;
         model.lastPhase = msg.game.phase;
         const me = msg.game.players.find((p) => p.id === model.youId);
         if (me?.seat != null && msg.game.phase !== "scoring") model.formSeat = me.seat;
-        if (msg.game.phase === "scoring" && prev !== "scoring" && me?.seat != null) {
-          model.formSeat = me.seat;
+        if (msg.game.phase === "scoring" && prev !== "scoring") {
+          model.formDirty = false;
+          if (me?.seat != null) model.formSeat = me.seat;
         }
-        if (prev === "scoring" && msg.game.phase === "playing") toast("El yazıldı.", true);
         if (model.game.phase === "scoring") syncFormFromGame();
+        noteTransition(prev, prevHistory, msg.game);
+        if (becameHost) toast("Masa sende.", true);
         render();
       }
     } catch {}
   });
+
   ws.addEventListener("close", () => {
-    if (model.screen === "table" && !model.solo) toast("Bağlantı koptu, yenile.");
+    if (model.ws === ws || model.ws === null) stopHeartbeat();
+    if (model.ws !== ws) return;
+    model.ws = null;
+    if (!model.wantSocket || model.solo || model.screen !== "table") return;
+    const first = !model.reconnecting;
+    model.reconnecting = true;
+    scheduleReconnect();
+    if (first) toast("Bağlantı koptu, yeniden bağlanıyor.");
+    else render();
   });
 }
 
@@ -178,7 +351,10 @@ function requireName(): boolean {
 
 function startSolo() {
   if (!requireName()) return;
+  stopOnline();
   model.solo = true;
+  model.lastPhase = null;
+  model.openHand = null;
   model.youId = playerId();
   model.game = emptyGame("SOLO");
   const hello = applyEvent(model.game, model.youId, {
@@ -194,9 +370,19 @@ function startSolo() {
 function startOnline(code: string) {
   if (!requireName()) return;
   model.solo = false;
+  model.lastPhase = null;
+  model.openHand = null;
   model.screen = "table";
   model.game = emptyGame(code);
-  connect(code);
+  model.roomCode = code;
+  model.wantSocket = true;
+  model.reconnecting = false;
+  model.reconnectAttempt = 0;
+  if (model.reconnectTimer != null) {
+    window.clearTimeout(model.reconnectTimer);
+    model.reconnectTimer = null;
+  }
+  openSocket(code);
   render();
 }
 
@@ -210,6 +396,10 @@ root.addEventListener("input", (ev) => {
   if (field === "remaining") model.form.remaining = Number(t.value) || 0;
   if (field === "openingValue") model.form.openingValue = t.value === "" ? null : Number(t.value) || 0;
   if (field === "pairCount") model.form.pairCount = t.value === "" ? null : Number(t.value) || 0;
+  if (field === "remaining" || field === "openingValue" || field === "pairCount") {
+    touchForm();
+    renderKeepingFocus();
+  }
 });
 
 root.addEventListener("click", (ev) => {
@@ -233,6 +423,17 @@ root.addEventListener("click", (ev) => {
   }
   if (act === "start") send({ type: "start" });
   if (act === "end-hand") send({ type: "endHand" });
+  if (act === "undo") {
+    if (confirm("Son el silinsin mi?")) send({ type: "undo" });
+  }
+  if (act === "cancel-hand") {
+    if (confirm("Bu el yazılmadan kapansın mı?")) send({ type: "cancelHand" });
+  }
+  if (act === "hand") {
+    const i = Number(t.dataset.i);
+    model.openHand = model.openHand === i ? null : i;
+    render();
+  }
   if (act === "reset") {
     if (confirm("Skorlar sıfırlansın mı?")) send({ type: "resetScores" });
   }
@@ -245,16 +446,19 @@ root.addEventListener("click", (ev) => {
   }
   if (act === "form-seat") {
     model.formSeat = Number(t.dataset.seat) as Seat;
+    model.formDirty = false;
     syncFormFromGame();
     render();
   }
   if (act === "open") {
     model.form.open = t.dataset.v as OpenKind;
+    touchForm();
     render();
   }
   if (act === "okey") {
     const d = Number(t.dataset.d);
     model.form.okeyCount = Math.min(2, Math.max(0, model.form.okeyCount + d));
+    touchForm();
     render();
   }
   if (act === "toggle") {
@@ -265,6 +469,7 @@ root.addEventListener("click", (ev) => {
       model.form.okeyFinish = false;
     }
     if ((k === "elden" || k === "okeyFinish") && model.form[k]) model.form.finished = true;
+    touchForm();
     render();
   }
   if (act === "chip") {
@@ -276,12 +481,14 @@ root.addEventListener("click", (ev) => {
     }
     if (k === "islek" || k === "okey_atma" || k === "hatali_acma") {
       model.form.penalties = [...model.form.penalties, { kind: k }];
+      touchForm();
       render();
     }
   }
   if (act === "del-chip") {
     const i = Number(t.dataset.i);
     model.form.penalties = model.form.penalties.filter((_, idx) => idx !== i);
+    touchForm();
     render();
   }
   if (act === "alip-tile") {
@@ -298,6 +505,7 @@ root.addEventListener("click", (ev) => {
       { kind: "alip_acma", tile: model.alip.tile, open: model.alip.open },
     ];
     model.alip = null;
+    touchForm();
     render();
   }
   if (act === "alip-cancel") {
@@ -306,6 +514,7 @@ root.addEventListener("click", (ev) => {
   }
   if (act === "submit") {
     model.form.seat = model.formSeat;
+    model.formDirty = false;
     send({ type: "submit", entry: model.form });
     toast("Kaydedildi.", true);
   }
@@ -320,6 +529,10 @@ export function boot() {
     if (code) model.codeInput = code;
   }
   render();
+  window.addEventListener("online", nudgeReconnect);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") nudgeReconnect();
+  });
   if (oda && model.name) {
     const code = normalizeCode(oda);
     if (code) startOnline(code);

@@ -268,6 +268,24 @@ select {
   font-size: 14px;
 }
 
+.hand-now {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 28px;
+  padding-top: 4px;
+}
+
+.hand-now .tiny {
+  grid-column: 1 / -1;
+}
+
+.who-score {
+  display: flex;
+  justify-content: flex-start;
+  gap: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
 .toast {
   position: sticky;
   bottom: 12px;
@@ -285,6 +303,10 @@ select {
 .tiny {
   font-size: 12px;
   color: var(--muted);
+}
+
+.link-wait {
+  color: var(--gold);
 }
 
 .list {
@@ -333,4 +355,41 @@ select {
 
 .status-dot.on {
   background: var(--ok);
+}
+
+.breakdown {
+  display: grid;
+  gap: 4px;
+  background: #0a241c;
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+
+.bd-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.hand-row {
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--line);
+  background: #0a241c;
+  color: var(--ink);
+  border-radius: 12px;
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+}
+
+.hand-detail {
+  display: grid;
+  gap: 10px;
+}
+
+.seat-line {
+  display: grid;
+  gap: 4px;
 }

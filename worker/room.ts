@@ -1,6 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
-import { applyEvent } from "../shared/engine.ts";
+import { applyEvent, handoffHost } from "../shared/engine.ts";
 import { emptyGame, type ClientEvent, type GameState } from "../shared/types.ts";
+
+const HOST_HANDOFF_MS = 15_000;
 
 type Session = { playerId: string };
 
@@ -42,6 +44,12 @@ export class Room extends DurableObject<Env> {
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
     if (typeof message !== "string") return;
+    if (message === "ping") {
+      try {
+        ws.send("pong");
+      } catch {}
+      return;
+    }
     const event = parseEvent(message);
     if (!event) {
       ws.send(JSON.stringify({ type: "error", message: "Bozuk mesaj." }));
@@ -73,6 +81,7 @@ export class Room extends DurableObject<Env> {
           p.id === actorId ? { ...p, connected: true } : p,
         ),
       };
+      if (actorId === this.game.hostId) await this.ctx.storage.deleteAlarm();
     }
     await this.ctx.storage.put("game", this.game);
 
@@ -83,17 +92,54 @@ export class Room extends DurableObject<Env> {
   }
 
   async webSocketClose(ws: WebSocket) {
-    const session = ws.deserializeAttachment() as Session | null;
-    if (session?.playerId && this.game) {
-      this.game = {
-        ...this.game,
-        players: this.game.players.map((p) =>
-          p.id === session.playerId && !p.guest ? { ...p, connected: false } : p,
-        ),
-      };
-      await this.ctx.storage.put("game", this.game);
-      this.broadcast();
+    await this.dropPlayer(ws);
+  }
+
+  async webSocketError(ws: WebSocket) {
+    try {
+      ws.close();
+    } catch {
+      await this.dropPlayer(ws);
     }
+  }
+
+  async alarm() {
+    if (!this.game) return;
+    const next = handoffHost(this.game);
+    if (next === this.game) return;
+    this.game = next;
+    await this.ctx.storage.put("game", this.game);
+    this.broadcast();
+  }
+
+  playerStillHere(playerId: string, except: WebSocket): boolean {
+    return this.ctx.getWebSockets().some((socket) => {
+      if (socket === except) return false;
+      const session = socket.deserializeAttachment() as Session | null;
+      return session?.playerId === playerId;
+    });
+  }
+
+  async dropPlayer(ws: WebSocket) {
+    const session = ws.deserializeAttachment() as Session | null;
+    const playerId = session?.playerId;
+    if (!playerId || !this.game) return;
+    if (this.playerStillHere(playerId, ws)) return;
+    const player = this.game.players.find((p) => p.id === playerId);
+    if (!player || player.guest || !player.connected) return;
+    const wasHost = this.game.hostId === playerId;
+    this.game = {
+      ...this.game,
+      players: this.game.players.map((p) =>
+        p.id === playerId ? { ...p, connected: false } : p,
+      ),
+    };
+    await this.ctx.storage.put("game", this.game);
+    const someoneElse = this.game.players.some((p) => !p.guest && p.connected);
+    if (wasHost && someoneElse) {
+      await this.ctx.storage.setAlarm(Date.now() + HOST_HANDOFF_MS);
+    }
+    this.broadcast();
   }
 
   broadcast() {

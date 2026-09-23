@@ -1,4 +1,4 @@
-import { scoreHand } from "../shared/rules.ts";
+import { rawScore, scoreHand } from "../shared/rules.ts";
 import {
   TEAMS,
   partnerOf,
@@ -20,6 +20,76 @@ export function esc(s: string): string {
 function posClass(abs: Seat, my: Seat): "s" | "e" | "n" | "w" {
   const r = ((abs - my + 4) % 4) as 0 | 1 | 2 | 3;
   return (["s", "e", "n", "w"] as const)[r];
+}
+
+function fmt(n: number): string {
+  if (n > 0) return `+${n}`;
+  return String(n);
+}
+
+function handKey(e: HandEntry): string {
+  return JSON.stringify([
+    e.open,
+    e.remaining,
+    e.okeyCount,
+    e.openingValue,
+    e.pairCount,
+    e.penalties,
+    e.finished,
+    e.elden,
+    e.okeyFinish,
+  ]);
+}
+
+export function breakdownMarkup(entry: HandEntry, written: number, draft = false): string {
+  const p = rawScore(entry);
+  const rows: [string, number][] = [
+    ["El sonu", p.sonu],
+    ["El içi", p.ici],
+    ["Açış", p.acis],
+    ["Bitiş", p.bitis],
+  ];
+  const note =
+    written !== p.ham
+      ? written === 0
+        ? "Eşi bitti, bu ceza yazılmaz."
+        : "Bitiren yalnız açış ve bitiş yazar."
+      : "";
+  return `
+    <div class="breakdown">
+      ${rows.map(([label, n]) => `<div class="bd-row"><span>${label}</span><span>${fmt(n)}</span></div>`).join("")}
+      <div class="bd-row"><strong>Bu koltuk</strong><strong>${fmt(written)}</strong></div>
+      ${note ? `<div class="tiny">${note}</div>` : ""}
+      ${draft ? `<div class="tiny">Taslak. Kilide geçmesi için Kaydet.</div>` : ""}
+    </div>`;
+}
+
+export function liveBreakdown(game: GameState, form: HandEntry, formSeat: Seat): string {
+  if (!game.current) return "";
+  const entries = game.current.map((e, i) => (i === formSeat ? form : e)) as [
+    HandEntry,
+    HandEntry,
+    HandEntry,
+    HandEntry,
+  ];
+  const server = game.current[formSeat];
+  const draft = server ? handKey(server) !== handKey(form) : false;
+  return breakdownMarkup(form, scoreHand(entries)[formSeat], draft);
+}
+
+function entryFacts(e: HandEntry): string {
+  const bits: string[] = [];
+  if (e.finished) bits.push("bitti");
+  if (e.elden) bits.push("elden");
+  if (e.okeyFinish) bits.push("okeyle");
+  if (e.open === "none") bits.push("açmadı");
+  else if (e.open === "per") bits.push(`per ${e.openingValue ?? "—"}`);
+  else bits.push(`${e.pairCount ?? "—"} çift`);
+  if (!e.finished && e.open !== "none") {
+    bits.push(`kalan ${e.remaining}`);
+    if (e.okeyCount) bits.push(`${e.okeyCount} okey`);
+  }
+  return bits.join(" · ");
 }
 
 function penaltyLabel(p: PenaltyChip): string {
@@ -64,28 +134,44 @@ export function renderTable(opts: {
   toast: string;
   toastOk: boolean;
   solo: boolean;
+  reconnecting: boolean;
+  openHand: number | null;
   alip: { tile: number; open: "per" | "cift" } | null;
 }): string {
   const { game, youId, form, formSeat } = opts;
   const me = game.players.find((p) => p.id === youId);
   const mySeat = (me?.seat ?? 0) as Seat;
   const host = game.hostId === youId;
-  const entries = game.current
-    ? (game.current.map((e, i) => (i === formSeat ? form : e)) as [
-        HandEntry,
-        HandEntry,
-        HandEntry,
-        HandEntry,
-      ])
-    : null;
-  const preview = entries ? scoreHand(entries) : game.totals;
-  const showTotals = game.phase !== "scoring" ? game.totals : preview;
+  const totals = game.totals;
+  const handNow = game.current ? scoreHand(game.current) : null;
 
-  const a = teamTotal(showTotals, TEAMS[0]);
-  const b = teamTotal(showTotals, TEAMS[1]);
+  const a = teamTotal(totals, TEAMS[0]);
+  const b = teamTotal(totals, TEAMS[1]);
   const leadA = a < b;
   const leadB = b < a;
   const diff = Math.abs(a - b);
+
+  const personLine = (seats: [Seat, Seat]) =>
+    seats
+      .map((s) => {
+        const name = playerAtSeat(game, s)?.name ?? `Koltuk ${s + 1}`;
+        return `${esc(name)} ${totals[s]}`;
+      })
+      .join(" · ");
+
+  const handLine =
+    handNow == null
+      ? ""
+      : `<div class="hand-now">
+          <div class="tiny">Bu el</div>
+          ${([0, 1, 2, 3] as Seat[])
+            .map((s) => {
+              const name = playerAtSeat(game, s)?.name ?? `Koltuk ${s + 1}`;
+              const saved = Boolean(game.current?.[s]?.saved);
+              return `<div class="who-score"><span>${esc(name)}</span><span>${saved ? fmt(handNow[s]) : "—"}</span></div>`;
+            })
+            .join("")}
+        </div>`;
 
   const seats = ([0, 1, 2, 3] as Seat[])
     .map((seat) => {
@@ -118,7 +204,7 @@ export function renderTable(opts: {
           <div>
             <div class="tiny">Takım</div>
             <div>${esc(teamNames(game, TEAMS[0]))}</div>
-            <div class="tiny">${esc(playerAtSeat(game, TEAMS[0][0])?.name ?? "?")} ${showTotals[TEAMS[0][0]]} · ${esc(playerAtSeat(game, TEAMS[0][1])?.name ?? "?")} ${showTotals[TEAMS[0][1]]}</div>
+            <div class="tiny">${personLine(TEAMS[0])}</div>
           </div>
           <div class="pts">${a}</div>
         </div>
@@ -126,13 +212,14 @@ export function renderTable(opts: {
           <div>
             <div class="tiny">Takım</div>
             <div>${esc(teamNames(game, TEAMS[1]))}</div>
-            <div class="tiny">${esc(playerAtSeat(game, TEAMS[1][0])?.name ?? "?")} ${showTotals[TEAMS[1][0]]} · ${esc(playerAtSeat(game, TEAMS[1][1])?.name ?? "?")} ${showTotals[TEAMS[1][1]]}</div>
+            <div class="tiny">${personLine(TEAMS[1])}</div>
           </div>
           <div class="pts">${b}</div>
         </div>
+        ${handLine}
         <div class="diff">${
           diff === 0 ? "Fark yok" : `${esc(leadA ? teamNames(game, TEAMS[0]) : teamNames(game, TEAMS[1]))} önde ${diff}`
-        }${game.phase === "scoring" ? " · canlı" : ""} · ${game.history.length} el</div>
+        } · ${game.history.length} el</div>
       </div>
     </div>`;
 
@@ -141,7 +228,8 @@ export function renderTable(opts: {
       ${([0, 1, 2, 3] as Seat[])
         .map((s) => {
           const p = playerAtSeat(game, s);
-          return `<button class="chip ${formSeat === s ? "on" : ""}" data-act="form-seat" data-seat="${s}">${esc(p?.name ?? `Koltuk ${s + 1}`)}</button>`;
+          const saved = Boolean(game.current?.[s]?.saved);
+          return `<button class="chip ${formSeat === s ? "on" : ""}" data-act="form-seat" data-seat="${s}"><span class="status-dot ${saved ? "on" : ""}"></span>${esc(p?.name ?? `Koltuk ${s + 1}`)}</button>`;
         })
         .join("")}
     </div>`;
@@ -149,7 +237,7 @@ export function renderTable(opts: {
   return `
     <div class="top">
       <h1 class="brand">101 <span>Masa</span></h1>
-      <div class="tiny">${opts.solo ? "tek telefon" : "eşler karşılıklı"}${host ? " · sahipsin" : ""}</div>
+      <div class="tiny">${opts.solo ? "tek telefon" : "eşler karşılıklı"}${host ? " · sahipsin" : ""}${opts.reconnecting ? ` · <span class="link-wait">bağlanıyor</span>` : ""}</div>
     </div>
     <div class="table">
       ${seats}
@@ -162,12 +250,18 @@ export function renderTable(opts: {
       </div>
     </div>
     ${board}
+    ${game.history.length ? renderHistory(game, opts.openHand) : ""}
     ${
       game.phase === "lobby"
         ? renderLobby(host, opts.guestName)
         : game.phase === "playing"
           ? renderPlaying(host, game.history.length)
-          : `${people}${renderForm(form, formSeat, host || me?.seat === formSeat, { host, alip: opts.alip })}`
+          : `${people}${renderForm(form, formSeat, host || me?.seat === formSeat, {
+              host,
+              alip: opts.alip,
+              breakdown: liveBreakdown(game, form, formSeat),
+              pending: game.current?.filter((e) => !e.saved).length ?? 0,
+            })}`
     }
     ${
       opts.toast
@@ -199,12 +293,55 @@ function renderLobby(host: boolean, guestName: string): string {
     </div>`;
 }
 
+function renderHistory(game: GameState, openHand: number | null): string {
+  const rows = game.history
+    .map((hand, i) => {
+      const line = ([0, 1, 2, 3] as Seat[])
+        .map((s) => {
+          const name = playerAtSeat(game, s)?.name ?? `Koltuk ${s + 1}`;
+          return `${esc(name)} ${fmt(hand.scores[s])}`;
+        })
+        .join(" · ");
+      const open = openHand === i;
+      const detail = !open
+        ? ""
+        : hand.entries
+          ? `<div class="hand-detail">
+              ${hand.entries
+                .map((e, s) => {
+                  const name = playerAtSeat(game, s as Seat)?.name ?? `Koltuk ${s + 1}`;
+                  const pens = e.penalties.map((p) => esc(penaltyLabel(p))).join(" · ");
+                  return `<div class="seat-line">
+                    <strong>${esc(name)}</strong>
+                    <div class="tiny">${esc(entryFacts(e))}</div>
+                    ${pens ? `<div class="tiny">${pens}</div>` : ""}
+                    ${breakdownMarkup(e, hand.scores[s])}
+                  </div>`;
+                })
+                .join("")}
+            </div>`
+          : `<p class="tiny">Bu elin taş dökümü yok. Puanlar: ${line}</p>`;
+      return `<button class="hand-row" data-act="hand" data-i="${i}">
+          <span>${i + 1}. el</span>
+          <span class="tiny">${line}</span>
+        </button>
+        ${detail}`;
+    })
+    .join("");
+  return `<div class="card stack"><div class="tiny">Eller</div>${rows}</div>`;
+}
+
 function renderPlaying(host: boolean, n: number): string {
   return `
     <div class="card stack">
       <p class="sub">${n + 1}. el. Destek bitince veya biri bitince masa sahibi basar.</p>
-      ${host ? `<button class="btn" data-act="end-hand">El bitti</button>
-        <button class="btn secondary" data-act="reset">Skorları sıfırla</button>` : `<p class="tiny">El bitince form açılacak.</p>`}
+      ${
+        host
+          ? `<button class="btn" data-act="end-hand">El bitti</button>
+        ${n > 0 ? `<button class="btn secondary" data-act="undo">Son eli geri al</button>` : ""}
+        <button class="btn secondary" data-act="reset">Skorları sıfırla</button>`
+          : `<p class="tiny">El bitince form açılacak.</p>`
+      }
     </div>`;
 }
 
@@ -212,7 +349,12 @@ function renderForm(
   form: HandEntry,
   seat: Seat,
   canEdit: boolean,
-  opts: { host: boolean; alip: { tile: number; open: "per" | "cift" } | null },
+  opts: {
+    host: boolean;
+    alip: { tile: number; open: "per" | "cift" } | null;
+    breakdown: string;
+    pending: number;
+  },
 ): string {
   const disabled = canEdit ? "" : "disabled";
   const open = form.open;
@@ -297,8 +439,15 @@ function renderForm(
             </div>`
           : ""
       }
+      <div data-breakdown>${opts.breakdown}</div>
       ${canEdit ? `<button class="btn" data-act="submit">Kaydet</button>` : ""}
-      ${opts.host ? `<button class="btn" data-act="lock">Puanı yaz / kilitle</button>` : `<p class="tiny">Kaydı bas, sonra masa sahibi kilitler.</p>`}
+      ${
+        opts.host
+          ? `${opts.pending ? `<p class="tiny">${opts.pending} koltuk boş. Yine de kilitleyebilirsin.</p>` : ""}
+            <button class="btn" data-act="lock">Puanı yaz / kilitle</button>
+            <button class="btn secondary" data-act="cancel-hand">Eli iptal et</button>`
+          : `<p class="tiny">Kaydı bas, sonra masa sahibi kilitler.</p>`
+      }
     </div>
     <p class="tiny">Yanlışsa koltuğu seçip düzelt, tekrar kaydet.</p>
   `;
