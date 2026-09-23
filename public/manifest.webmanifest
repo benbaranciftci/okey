@@ -1,0 +1,16 @@
+{
+  "name": "101 Masa",
+  "short_name": "101",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0c2f24",
+  "theme_color": "#0c2f24",
+  "lang": "tr",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
