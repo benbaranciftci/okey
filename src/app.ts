@@ -40,6 +40,7 @@ type Model = {
   openHand: number | null;
   lastPhase: GameState["phase"] | null;
   formDirty: boolean;
+  qrOpen: boolean;
 };
 
 const model: Model = {
@@ -67,6 +68,7 @@ const model: Model = {
   openHand: null,
   lastPhase: null,
   formDirty: false,
+  qrOpen: false,
 };
 
 const root = document.getElementById("app")!;
@@ -131,6 +133,8 @@ function render() {
     toastOk: model.toastOk,
     solo: model.solo,
     reconnecting: model.reconnecting,
+    qrOpen: model.qrOpen,
+    joinUrl: roomLink(model.game.code),
     openHand: model.openHand,
     alip: model.alip,
   });
@@ -144,6 +148,7 @@ function send(event: ClientEvent) {
     const result = applyEvent(model.game, model.youId, event);
     if (result.error) toast(result.error);
     model.game = result.game;
+    if (model.game.phase !== "lobby") model.qrOpen = false;
     const me = model.game.players.find((p) => p.id === model.youId);
     if (model.game.phase === "scoring" && prev !== "scoring") {
       model.formDirty = false;
@@ -308,6 +313,7 @@ function openSocket(code: string) {
         const becameHost = prevHost !== "" && msg.game.hostId !== prevHost && msg.game.hostId === model.youId;
         const prev = model.lastPhase;
         model.game = msg.game;
+        if (msg.game.phase !== "lobby") model.qrOpen = false;
         model.screen = "table";
         model.error = "";
         model.lastPhase = msg.game.phase;
@@ -437,8 +443,16 @@ root.addEventListener("click", (ev) => {
   if (act === "reset") {
     if (confirm("Skorlar sıfırlansın mı?")) send({ type: "resetScores" });
   }
+  if (act === "qr") {
+    model.qrOpen = true;
+    render();
+  }
+  if (act === "qr-close") {
+    model.qrOpen = false;
+    render();
+  }
   if (act === "copy") {
-    const url = `${location.origin}${location.pathname}?oda=${model.game?.code ?? ""}`;
+    const url = roomLink(model.game?.code ?? "");
     void navigator.clipboard.writeText(url).then(
       () => toast("Link kopyalandı.", true),
       () => toast(url, true),
@@ -521,7 +535,16 @@ root.addEventListener("click", (ev) => {
   if (act === "lock") send({ type: "lock" });
 });
 
+function roomLink(code: string): string {
+  return `${location.origin}${location.pathname}?oda=${code}`;
+}
+
 export function boot() {
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Escape" || !model.qrOpen) return;
+    model.qrOpen = false;
+    render();
+  });
   const params = new URLSearchParams(location.search);
   const oda = params.get("oda");
   if (oda) {

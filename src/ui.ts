@@ -1,3 +1,4 @@
+import { renderSVG } from "uqr";
 import { rawScore, scoreHand } from "../shared/rules.ts";
 import {
   TEAMS,
@@ -135,6 +136,8 @@ export function renderTable(opts: {
   toastOk: boolean;
   solo: boolean;
   reconnecting: boolean;
+  qrOpen: boolean;
+  joinUrl: string;
   openHand: number | null;
   alip: { tile: number; open: "per" | "cift" } | null;
 }): string {
@@ -244,7 +247,11 @@ export function renderTable(opts: {
       <div class="felt">
         <div>
           <div class="tiny">oda</div>
-          <div class="code">${esc(game.code)}</div>
+          ${
+            opts.solo || game.phase !== "lobby"
+              ? `<div class="code">${esc(game.code)}</div>`
+              : `<button class="code" type="button" data-act="qr">${esc(game.code)}</button><div class="tiny">dokun, QR</div>`
+          }
           ${opts.solo ? "" : `<button class="btn secondary" data-act="copy" style="margin-top:8px;padding:8px 10px">Linki kopyala</button>`}
         </div>
       </div>
@@ -268,7 +275,27 @@ export function renderTable(opts: {
         ? `<div class="toast ${opts.toastOk ? "ok-toast" : ""}">${esc(opts.toast)}</div>`
         : ""
     }
+    ${opts.qrOpen && game.phase === "lobby" && !opts.solo ? renderQr(game.code, opts.joinUrl) : ""}
   `;
+}
+
+function renderQr(code: string, url: string): string {
+  const svg = renderSVG(url, {
+    border: 4,
+    ecc: "M",
+    pixelSize: 8,
+    whiteColor: "#ffffff",
+    blackColor: "#1c1712",
+  });
+  return `
+    <div class="qr-shade" data-act="qr-close">
+      <div class="qr-sheet" data-act="qr-sheet">
+        <div class="tiny">Kamerayla okut</div>
+        <div class="qr-frame">${svg}</div>
+        <div class="code">${esc(code)}</div>
+        <button class="btn secondary" type="button" data-act="qr-close">Kapat</button>
+      </div>
+    </div>`;
 }
 
 function renderLobby(host: boolean, guestName: string): string {

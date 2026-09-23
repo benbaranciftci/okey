@@ -191,6 +191,48 @@ select {
   color: var(--gold);
 }
 
+button.code {
+  display: block;
+  margin: 0 auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--gold);
+}
+
+.qr-shade {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: #06140f;
+  display: grid;
+  place-items: center;
+  padding: max(20px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+    max(20px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+}
+
+.qr-sheet {
+  width: min(92vw, 440px);
+  display: grid;
+  justify-items: center;
+  gap: 14px;
+  text-align: center;
+}
+
+.qr-frame {
+  width: min(86vw, 400px, max(180px, calc(100dvh - 210px)));
+  background: #fff;
+  border-radius: 20px;
+  overflow: hidden;
+  line-height: 0;
+}
+
+.qr-frame svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
 .seat {
   border: 1px dashed var(--line);
   background: rgba(8, 28, 22, 0.7);
