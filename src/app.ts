@@ -40,6 +40,7 @@ type Model = {
   openHand: number | null;
   lastPhase: GameState["phase"] | null;
   formDirty: boolean;
+  pendingSubmit: HandEntry | null;
   qrOpen: boolean;
 };
 
@@ -68,6 +69,7 @@ const model: Model = {
   openHand: null,
   lastPhase: null,
   formDirty: false,
+  pendingSubmit: null,
   qrOpen: false,
 };
 
@@ -169,12 +171,56 @@ function send(event: ClientEvent) {
   model.ws.send(JSON.stringify(event));
 }
 
+function cloneEntry(entry: HandEntry): HandEntry {
+  return { ...entry, penalties: entry.penalties.map((p) => ({ ...p })) };
+}
+
+function entryKey(entry: HandEntry): string {
+  return JSON.stringify([
+    entry.seat,
+    entry.open,
+    entry.remaining,
+    entry.okeyCount,
+    entry.openingValue,
+    entry.pairCount,
+    entry.penalties,
+    entry.finished,
+    entry.elden,
+    entry.okeyFinish,
+    entry.saved,
+  ]);
+}
+
 function syncFormFromGame() {
   if (model.formDirty) return;
   const g = model.game;
   if (!g?.current) return;
   const entry = g.current[model.formSeat];
-  if (entry) model.form = { ...entry, penalties: [...entry.penalties] };
+  if (entry) model.form = cloneEntry(entry);
+}
+
+function absorbState(game: GameState): GameState {
+  const pending = model.pendingSubmit;
+  if (!pending) return game;
+  if (game.phase !== "scoring" || !game.current) {
+    model.pendingSubmit = null;
+    return game;
+  }
+  const remote = game.current[pending.seat];
+  if (remote && entryKey(remote) === entryKey(pending)) {
+    model.pendingSubmit = null;
+    return game;
+  }
+  if (remote?.saved) {
+    model.pendingSubmit = null;
+    return game;
+  }
+  const merged = applyEvent(game, model.youId, { type: "submit", entry: pending });
+  if (merged.error) {
+    model.pendingSubmit = null;
+    return game;
+  }
+  return merged.game;
 }
 
 function touchForm() {
@@ -304,6 +350,14 @@ function openSocket(code: string) {
     try {
       const msg = JSON.parse(String(ev.data)) as { type: string; game?: GameState; youId?: string; message?: string };
       if (msg.type === "error" && msg.message) {
+        if (
+          msg.message === "El girişi açık değil." ||
+          msg.message === "Masada değilsin." ||
+          msg.message === "Bu koltuğu sen dolduramazsın." ||
+          msg.message === "Geçersiz koltuk."
+        ) {
+          model.pendingSubmit = null;
+        }
         toast(msg.message);
         return;
       }
@@ -312,7 +366,7 @@ function openSocket(code: string) {
         const prevHistory = model.game?.history.length ?? 0;
         const becameHost = prevHost !== "" && msg.game.hostId !== prevHost && msg.game.hostId === model.youId;
         const prev = model.lastPhase;
-        model.game = msg.game;
+        model.game = absorbState(msg.game);
         if (msg.game.phase !== "lobby") model.qrOpen = false;
         model.screen = "table";
         model.error = "";
@@ -527,9 +581,33 @@ root.addEventListener("click", (ev) => {
     render();
   }
   if (act === "submit") {
+    if (!model.game) return;
     model.form.seat = model.formSeat;
+    if (!model.solo && (!model.ws || model.ws.readyState !== WebSocket.OPEN)) {
+      toast(model.reconnecting ? "Yeniden bağlanıyor." : "Bağlantı yok.");
+      nudgeReconnect();
+      return;
+    }
+    const result = applyEvent(model.game, model.youId, { type: "submit", entry: model.form });
+    if (result.error) {
+      toast(result.error);
+      return;
+    }
+    model.game = result.game;
     model.formDirty = false;
-    send({ type: "submit", entry: model.form });
+    const saved = result.game.current?.[model.formSeat];
+    const pending = saved ? cloneEntry(saved) : null;
+    model.pendingSubmit = pending;
+    syncFormFromGame();
+    if (model.solo) {
+      model.pendingSubmit = null;
+      localStorage.setItem("okey.solo", JSON.stringify(model.game));
+      toast("Kaydedildi.", true);
+      return;
+    }
+    if (pending) {
+      model.ws?.send(JSON.stringify({ type: "submit", entry: pending } satisfies ClientEvent));
+    }
     toast("Kaydedildi.", true);
   }
   if (act === "lock") send({ type: "lock" });
